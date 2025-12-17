@@ -26,15 +26,15 @@ const tempSchema = new mongoose.Schema({
         default: 'guest'
     },
     otpCode: {
-    type: String,
-    required: true,
-  },
-  expiredOtp: {
-    type: Date,
-    required: true,
-    index: { expires: 0 }, // TTL index to auto-delete document after expiration
-  }
-}, {timestamps: true, versionKey: false })
+        type: String,
+        required: true,
+    },
+    expiredOtp: {
+        type: Date,
+        required: true,
+        index: { expires: 0 }, // TTL index to auto-delete document after expiration
+    }
+}, { timestamps: true, versionKey: false })
 
 
 tempSchema.pre('save', async function () {
