@@ -1,10 +1,8 @@
 import express, { urlencoded } from 'express'
 import cookieParser from 'cookie-parser'
 import cors from 'cors'
-import User from './models/User.model.js'
-import TempUser from './models/TempUser.model.js'
 
-import authRouter from './routers/auth.route.js'
+import authRouter from './routers/auth.routes.js'
 import errorHandler from './utils/errorHandler.js'
 
 
@@ -30,75 +28,6 @@ app.use('/api/auth', authRouter)
 app.get('/', (req, res)=>{
     res.send('rent nest server is running....')
 })
-
-app.post("/register", async (req, res)=>{
-    const {userName, fullName, email, password} = req.body;
-    if(!userName || !fullName || !email || !password){
-        return res.status(400).json({message: "All fields are required"})
-    }
-    const exitingUser = await User.findOne({email});
-    if(exitingUser){
-        return res.status(409).json({message: "User already exists"})
-    }
-
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString() ;
-    const otpExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
-    let tempUser = await TempUser.findOne({email});
-    if(!tempUser){
-         tempUser = new TempUser({
-            userName,
-            fullName,
-            email,
-            password,   
-            otpCode,
-            expiredOtp: otpExpiresAt
-        });
-        await tempUser.save();
-        return res.status(201).json({message: "User registered successfully. Please verify your email."})
-    } else{
-        tempUser.userName = userName;
-        tempUser.fullName = fullName;
-        tempUser.password = password;
-        tempUser.otpCode = otpCode;
-        tempUser.expiredOtp = otpExpiresAt;
-        await tempUser.save();
-        return res.status(200).json({message: "OTP resent successfully. Please verify your email."})
-    }
-
-    
-    
-})
-
-app.post("/verify-otp", async (req, res)=>{
-    const {email, otp} = req.body;
-    const user = await TempUser.findOne({email});
-    if(!user){
-        return res.status(404).json({message: "User not found"});
-    }
-    if(!email || !otp){
-        return res.status(400).json({message: "Email and OTP are required"});
-    }
-    
-    const currentTime = new Date();
-    if(currentTime > user.expiredOtp){
-        return res.status(400).json({message: "OTP has expired. Please request a new one."});
-    }
-    if(user.otpCode !== otp){
-        return res.status(400).json({message: "Invalid OTP. Please try again."});
-    }
-
-   const newUser = new User({
-        userName: user.userName,
-        fullName: user.fullName,
-        email: user.email,
-        password: user.password,
-        role: user.role
-   });
-   await newUser.save();
-   await TempUser.deleteOne({_id: user._id})
-   return res.status(200).json({message: "OTP verified successfully."});
-})
-
 //global error handler
 app.use(errorHandler)
 

@@ -1,130 +1,283 @@
-import User from "../models/User.model.js";
-import jwt from 'jsonwebtoken'
+import { check, validationResult } from 'express-validator'
+import AsyncHandler from '../utils/AsyncHandler.js'
+import ApiErrors from '../utils/ApiErrors.js'
+import Users from '../models/Users.model.js'
+import bcrypt, { truncates } from 'bcryptjs'
+import TempUsers from '../models/TempUsers.model.js'
+import ApiResponse from '../utils/ApiResponse.js'
+import { generateToken } from '../utils/token.js'
+import { generatePasswordResetMail, generateVerificationMail, sendBrevoMail } from '../config/mail.js'
 
-export const registration = async (req, res) => {
-    const { fullName, email, password } = req.body;
-    if ( !fullName || !email || !password) {
-        return res.status(400).json({ message: "All fields are required" })
-    }
-    const exitingUser = await User.findOne({ email });
-    if (exitingUser && exitingUser.isVerified) {
-        return res.status(409).json({ message: "User already exists" })
-    }
+export const registration = [
+    check('email')
+        .trim()
+        .isEmail()
+        .withMessage('Entered a valid email'),
+    check('password')
+        .trim()
+        .isLength({ min: 8 })
+        .withMessage('password must be at least 8 characters')
+        .matches(/[a-zA-Z]/)
+        .withMessage('password must contain a letter')
+        .matches(/[0-9]/)
+        .withMessage('password must contain a number'),
 
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiresAt = Date.now() + 1000 * 60 * 5
-    if (!exitingUser) {
-        const newUser = new User({
-            fullName,
-            email,
-            password,
-            otpCode: otpCode,
-            expiredOtp: otpExpiresAt
-        });
-        await newUser.save();
+    AsyncHandler(async (req, res) => {
+        const { fullName, email, password, mobile, role } = req.body
+        if (!fullName || !email || !password || !mobile || !role) {
+            throw new ApiErrors(400, 'all fields are required')
+        }
 
+        const error = validationResult(req)
+        if (!error.isEmpty()) {
+            throw new ApiErrors(400, 'entered wrong value', error.array())
+        }
 
+        if (!['user', 'owner', 'deliveryBoy'].includes(role)) {
+            throw new ApiErrors(400, 'entered wrong role')
+        }
 
-        
-        //send otp is missing
+        const dublicatedUser = await Users.findOne({ email })
+        if (dublicatedUser) {
+            throw new ApiErrors(400, 'this email is already registered')
+        }
 
+        const otp = Math.floor(100000 + Math.random() * 900000).toString()
+        const expiredOtp = Date.now() + 5 * 60 * 1000
 
+        const hashPass = await bcrypt.hash(password, 12)
 
+        const { subject, html } = generateVerificationMail(otp)
 
+        await TempUsers.findOneAndUpdate(
+            { email },
+            { fullName, password: hashPass, mobile, role, otp, expiredOtp },
+            { new: true, upsert: true }
+        )
 
-        return res.status(201).json({ message: "User registered successfully. Please verify your email." })
-    } else {
-        exitingUser.otpCode = otpCode;
-        exitingUser.expiredOtp = otpExpiresAt;
-        await exitingUser.save();
-        return res.status(200).json({ message: "OTP resent successfully. Please verify your email." })
-    }
-}
+        await sendBrevoMail({ to: email, subject, html })
 
-export const verifyRegistration = async (req, res) => {
-    const { email, otp } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) {
-        return res.status(404).json({ message: "User not found" });
-    }
+        return res
+            .status(201)
+            .json(
+                new ApiResponse(201, {}, 'otp send successfully')
+            )
+    })
+]
 
-    if (!user.isVerified) {
-        return res.status(400).json({ message: "User already verified" });
-    }
-
-    if (!email || !otp) {
-        return res.status(400).json({ message: "Email and OTP are required" });
-    }
-
-    const currentTime = Date.now()
-    if (currentTime > user.expiredOtp) {
-        return res.status(400).json({ message: "OTP has expired. Please request a new one." });
-    }
-    if (user.otpCode !== otp) {
-        return res.status(400).json({ message: "Invalid OTP. Please try again." });
-    }
-
-    user.isVerified = true;
-    user.otpCode = undefined;
-    user.expiredOtp = undefined;
-    await user.save();
-    return res.status(200).json({ message: "OTP verified successfully." });
-}
-
-
-export const login = async(req, res)=>{
-    const {email, password} = req.body
-
-    if (!email || !password) {
-        return res.status(400).json({ message: "email and password are required" })
+export const verifyRegi = AsyncHandler(async (req, res) => {
+    const { email, otp } = req.body
+    if (!email) {
+        throw new ApiErrors(400, 'email are required')
     }
 
-    const user = User.findOne({email})
-    if (!user) {
-        return res.status(404).json({ message: "User not found" })
+    const tempUser = await TempUsers.findOne({ email })
+    if (!tempUser) {
+        throw new ApiErrors(404, 'user is not found')
     }
 
-    const isPassMatched = await user.isPasswordCorrect(password)
-
-    if (!isPassMatched) {
-        return res.status(400).json({ message: "password is not matched" })
+    if (otp === '' || otp !== tempUser.otp) {
+        throw new ApiErrors(400, 'otp is not matched')
     }
+
+    if (tempUser.expiredOtp.getTime() < Date.now()) {
+        throw new ApiErrors(400, 'otp is expired')
+    }
+
+    let user = await Users.create({
+        fullName: tempUser.fullName,
+        email: tempUser.email,
+        password: tempUser.password,
+        mobile: tempUser.mobile,
+        role: tempUser.role
+    })
 
     user.password = undefined
 
-    const token = await jwt.sign(
-        {userId: user._id},
-        process.env.TOKEN_SECRET_KEY,
-        {expiresIn: process.env.TOKEN_EXPIRED_TIME}
-    )
+    await TempUsers.findByIdAndDelete(tempUser._id)
 
+    return res
+        .status(200)
+        .json(
+            new ApiResponse(200, user, 'user verified successfully')
+        )
+})
+
+export const login = AsyncHandler(async (req, res) => {
+    const { email, password } = req.body
+    if (!email || !password) {
+        throw new ApiErrors(400, 'all field are required')
+    }
+
+    const user = await Users.findOne({ email })
+    if (!user) {
+        throw new ApiErrors(404, 'user not found')
+    }
+
+    const isPassMatched = await bcrypt.compare(password, user.password)
+    if (!isPassMatched) {
+        throw new ApiErrors(400, 'password does not matched')
+    }
+
+    user.password = undefined
+    const token = generateToken(user._id)
     const tokenOption = {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: true,
+        sameSite: 'none',
         maxAge: 10 * 24 * 60 * 60 * 1000,
     }
 
     return res
-        .status(201)
-        .cookie('token', token, tokenOption)
-        .json({ data:user, message: "user loggedIn successfully" })
-}
+        .status(200)
+        .cookie(
+            'token', token, tokenOption
+        )
+        .json(
+            new ApiResponse(200, user, 'user loggedIn successfully')
+        )
+})
 
-export const logout = async(req, res)=>{
-     try {
+export const logout = AsyncHandler(async (req, res) => {
+    try {
         const tokenOption = {
             httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict'
+            secure: true,
+            sameSite: 'none'
         }
 
         return res
             .status(200)
             .clearCookie('token', tokenOption)
-            .json({ message: "user logged out successfully" })
-            
+            .json(
+                new ApiResponse(200, {}, 'logged out successfully')
+            )
     } catch (error) {
-        return res.status(500).json({ message: "user logged out failed" })
+        throw new ApiErrors(500, 'user logged out failed')
     }
-}
+})
+
+export const forgetPassword = AsyncHandler(async (req, res) => {
+    const { email } = req.body
+    if (!email) {
+        throw new ApiErrors(400, 'email is required')
+    }
+
+    const user = await Users.findOne({ email })
+    if (!user) {
+        throw new ApiErrors(404, 'user not found')
+    }
+
+    const otp = Math.floor(100000 * Math.random() + 900000).toString()
+    const expiredOtp = Date.now() + 5 * 60 * 1000
+
+    const { subject, html } = generatePasswordResetMail(otp)
+
+    try {
+        await TempUsers.findOneAndUpdate(
+            { email },
+            { otp, expiredOtp },
+            { new: true, upsert: true }
+        )
+
+        await sendBrevoMail({ to: email, subject, html })
+
+        return res
+            .status(200)
+            .json(
+                new ApiResponse(200, {}, 'otp send successfully')
+            )
+    } catch (error) {
+        throw new ApiErrors(500, 'otp send failed')
+    }
+})
+
+export const verifyPass = AsyncHandler(async (req, res) => {
+    const { email, otp } = req.body
+    if (!email || !otp) {
+        throw new ApiErrors(400, 'all field are required')
+    }
+
+    const user = await TempUsers.findOne({ email })
+    if (!user) {
+        throw new ApiErrors(404, 'user is not found at tempuser')
+    }
+
+    if (otp !== user.otp) {
+        throw new ApiErrors(400, 'otp is not matched')
+    }
+
+    if (user.expiredOtp < Date.now()) {
+        throw new ApiErrors(400, 'otp is expired')
+    }
+
+    user.isVerified = true
+    await user.save({ validateBeforeSave: false })
+
+    return res
+        .status(200)
+        .json(
+            new ApiResponse(200, {}, 'user is verified successfully')
+        )
+})
+
+export const resetPass = [
+    check('password')
+        .trim()
+        .isLength({ min: 8 })
+        .withMessage('password must be at least 8 characters')
+        .matches(/[a-zA-Z]/)
+        .withMessage('password must contain a letter')
+        .matches(/[0-9]/)
+        .withMessage('password must contain a number'),
+
+    AsyncHandler(async (req, res) => {
+        const { email, password } = req.body
+        if (!email || !password) {
+            throw new ApiErrors(400, 'all field are required')
+        }
+
+        const error = validationResult(req)
+        if (!error.isEmpty()) {
+            throw new ApiErrors(400, 'entered wrong value', error.array())
+        }
+
+        const tempUser = await TempUsers.findOne({ email })
+        if (!tempUser) {
+            throw new ApiErrors(404, 'user is not found in temp user')
+        }
+
+        if (!tempUser.isVerified) {
+            throw new ApiErrors(400, 'user is not verified')
+        }
+
+        const hashPass = await bcrypt.hash(password, 12)
+        const user = await Users.findOneAndUpdate(
+            { email },
+            { password: hashPass },
+            { new: truncates }
+        )
+
+        user.password = undefined
+
+        await tempUser.deleteOne()
+
+        return res
+            .status(201)
+            .json(
+                new ApiResponse(200, user, 'password reset successfully')
+            )
+    })
+]
+
+export const getUsers = AsyncHandler(async (req, res) => {
+    const user = req?.user
+    if (!user) {
+        throw new ApiErrors(404, 'user not found')
+    }
+    return res
+        .status(200)
+        .json(
+            new ApiResponse(200, user, 'user data fetched successfully')
+        )
+})
