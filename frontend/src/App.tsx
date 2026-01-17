@@ -1,12 +1,20 @@
-import { Button } from "./components/ui/button";
-
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import Login from "./Login";
+import Register from "./Register";
+const router = createBrowserRouter([
+  {
+    path: "/login",
+    element: <Login />,
+  },
+  {
+    path: "/register",
+    element: <Register />,
+  }
+])
 const App = () => {
   return (
     <>
-      <div className="text-center m-8 text-green-600 text-5xl">Hello, do you need help?</div>
-      <div className="flex min-h-svh flex-col items-center justify-center">
-         <Button>Click me</Button>
-      </div>
+      <RouterProvider router={router} />
     </>
     
   );
